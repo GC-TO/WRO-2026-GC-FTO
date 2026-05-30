@@ -1,4 +1,4 @@
-# 🤖 CarloBot — WRO 2026 Future Engineers
+# WRO 2026 Future Engineers
 
 <div align="center">
 
