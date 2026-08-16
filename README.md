@@ -44,6 +44,9 @@
 **MAD Engineering** is the name formed by combining the first letter of each member's name: Manuel, Antonio, and Daniel. **CarloBot** is named after our coach Carlos España, who has guided and supported us throughout the entire development process at the Game Changer Robotics Academy.
 
 We are part of the Future Engineers division of Game Changer Robotics, a robotics academy based in El Salvador focused on developing engineering skills through real competition projects. This is our second international season — we previously competed at WRO Singapore 2025, where we represented El Salvador and brought back critical lessons that shaped the 2026 version of CarloBot.
+<div align="center">
+  <img width="960" height="1280" alt="WhatsApp Image 2026-06-20 at 15 24 34" src="https://github.com/user-attachments/assets/30821f63-e0bf-467d-9a7f-833e46ebfa98" />
+</div>
 
 ---
 
