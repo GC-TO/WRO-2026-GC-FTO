@@ -71,22 +71,29 @@ Every design decision in CarloBot responds to a specific engineering constraint 
 CarloBot is built around three processing units that communicate in real time:
 
 ```
-┌─────────────────┐        UART (115200 bps)      ┌───────────────┐
-│  OpenMV H7 Plus │ ─────────────────────────────► │     ESP32     │
-│  (Pro_CAM.py)   │   C:<color>,P:<position>\n     │ (Con_ESP32.py)│
-│                 │   every 80ms / on change        └───────┬───────┘
-│  480 MHz STM32  │                                         │
-│  32 MB SDRAM    │                                         │ PUPRemote
-│  QVGA 320×240   │                               Port D   │ LPF2 protocol
-└─────────────────┘                                         ▼
-                                                  ┌─────────────────┐
-      ┌──────────────┐                            │  LEGO Inventor  │
-      │ TF-Luna ×3   │ ──── SoftI2C @ 400kHz ──► │      Hub        │
-      │  (LiDAR ToF) │    3 independent buses     │ (Ope/Obs_Chall) │
-      │  0x10 each   │                            │                 │
-      └──────────────┘                            │  IMU 6-axis     │
-                                                  │  7.3V Li-ion    │
-                                                  └─────────────────┘
+┌─────────────────┐        UART (115200 bps)      ┌───────────────────────────┐
+│  OpenMV H7 Plus │ ─────────────────────────────► │          ESP32            │
+│  (Pro_CAM.py)   │   C:<color>,P:<position>\n     │      (Con_ESP32.py)       │
+│                 │   every 80ms / on change        │                           │
+│  480 MHz STM32  │                                 │  ┌─────────────────────┐  │
+│  32 MB SDRAM    │                                 │  │ TF-Luna ×3 (LiDAR)  │  │
+│  QVGA 320×240   │         SoftI2C @ 400 kHz      │  │ SoftI2C #1 GPIO21/22│  │
+└─────────────────┘   ◄─────────────────────────── │  │ SoftI2C #2 GPIO26/27│  │
+                          3 independent I²C buses   │  │ SoftI2C #3 GPIO15/13│  │
+                                                    │  └─────────────────────┘  │
+                                                    └─────────────┬─────────────┘
+                                                                  │ PUPRemote
+                                                         Port F   │ LPF2 protocol
+                                                                  ▼
+                                                    ┌─────────────────────────┐
+                                                    │     LEGO Inventor Hub   │
+                                                    │     (Ope/Obs_Chall.py)  │
+                                                    │                         │
+                                                    │  Motor E → Traction     │
+                                                    │  Motor B → Steering     │
+                                                    │  IMU 6-axis (heading)   │
+                                                    │  7.3V Li-ion battery    │
+                                                    └─────────────────────────┘
 ```
 
 ### Components
@@ -108,7 +115,7 @@ CarloBot is built around three processing units that communicate in real time:
 | TF-Luna 2 (Right) | GPIO 27 | GPIO 26 | SoftI2C #2 |
 | TF-Luna 3 (Left) | GPIO 13 | GPIO 15 | SoftI2C #3 |
 | UART from OpenMV | RX: GPIO 4 | — | UART1 @ 115,200 bps |
-| PUPRemote to Hub | Port D cable | — | LPF2 protocol |
+| PUPRemote to Hub | Port F cable | — | LPF2 protocol |
 
 > **Why 3 independent I²C buses?** All three TF-Luna sensors share the same I²C hardware address (0x10). Multiplexing or address remapping adds latency and complexity. Three independent SoftI2C buses eliminate address conflicts and allow all three sensors to be read in a non-blocking rotation without interfering with each other.
 
@@ -139,11 +146,11 @@ The codebase is split across four Python files, each targeting a specific piece 
 Runs on the **OpenMV H7 Plus**. Captures frames at **QVGA (320×240)** resolution and:
 
 - Detects **red** and **green** blobs using LAB color thresholds:
-  - Red: `(30, 85, 15, 70, -10, 55)`
+  - Red: `(0, 58, 14, 127, -128, 127)`
   - Green: `(30, 90, -128, -10, 0, 127)`
 - **Why LAB over RGB?** LAB's L (lightness) channel is fully decoupled from chrominance. Color thresholds remain stable even when ambient light changes — critical in venues with different lighting than our training environment.
 - Determines obstacle **position** (left = 1, right = 2) using two ROIs on the lower half of the frame:
-  - `ROI_LEFT = (10, 70, 70, 8)` / `ROI_RIGHT = (80, 70, 70, 8)`
+  - `ROI_LEFT = (20, 170, 140, 16)` / `ROI_RIGHT = (160, 170, 140, 16)`
 - Manages **adaptive PWM lighting** (hard-capped at 60%) via a brightness PID loop:
   - `PWM_new = (1 − α) · PWM_curr + α · (PWM_curr + Kp · brightness_error)`
   - α = 0.20 · Kp = 0.6 · Target brightness = 60 · Max PWM = 60%
@@ -171,10 +178,10 @@ Runs on the **ESP32** in MicroPython. Acts as a real-time sensor aggregator and 
   - State WAITING: if 3ms elapsed → read → validate → advance to next sensor → FREE
   - Effective update rate: **~37 Hz per sensor** · Full 3-sensor cycle: **~27 ms**
 - UART parsing uses direct byte arithmetic — `color = byte - 0x30` — with no `decode()` or `split()` to minimize heap pressure
-- Exposes data to the LEGO Hub via **PUPRemote** (LPF2 protocol) on Port D:
+- Exposes data to the LEGO Hub via **PUPRemote** (LPF2 protocol) on Port F:
   - `cam` channel: `int16` — camera detection code
   - `dist` channel: `3× int16` — LiDAR distances in mm (0–32,767)
-- Calls `pr.process()` every ~1ms to maintain stable Hub connection
+- Calls `pr.process()` every ~1ms; if connection is lost, automatically calls `conectar_hub()` to re-negotiate and `restaurar_canales()` to republish last known values — zero manual restart required
 - `bytearray` buffer for UART reads avoids allocating new heap objects per chunk
 - `gc.collect()` runs every 2 seconds to prevent heap fragmentation
 - Timeout fallbacks: LiDAR silent >300ms → distance resets to 0; camera silent >250ms → cam resets to 0
@@ -186,17 +193,28 @@ Runs on the **LEGO Inventor Hub** via PyBricks. Controls the robot for the **Ope
 - Auto-detects track direction at startup from lateral LiDAR readings — no manual setup needed
 - If right sensor > 1,000 mm first → **clockwise** (`sigue_pared1`); if left → **counter-clockwise** (`sigue_pared2`)
 - Wall-following uses `drive_with_heading_lock()` with ±12° heading corrections relative to accumulated base heading `p`
-- Corner detection: > 1,000 mm → 500ms confirmation → PID turn → 5 consecutive wall readings < 1,000 mm → resume
+- Corner detection: > 1,000 mm → 500ms confirmation → PID turn → 3 consecutive wall readings < 1,000 mm → resume
 - After **12 corners** (3 full laps), drives forward to finish line and stops
 
 ### `Obs_Chall.py` — Obstacle Challenge Controller
 
-Runs on the **LEGO Inventor Hub** via PyBricks. Extends the Open Challenge with color-based evasion:
+Runs on the **LEGO Inventor Hub** via PyBricks. Extends the Open Challenge with full bidirectional obstacle evasion:
 
-- 🔴 **Red block** → `rojo()`: +55° turn right → front wall follow → return to base heading
-- 🟢 **Green block** → `verde()`: −40° turn left → front wall follow → return to base heading
-- Variable `daniel` accumulates 90° per completed corner as an absolute heading offset, preventing IMU drift across multiple laps
-- After each evasion, re-reads camera to confirm block clearance before resuming
+- Auto-detects track direction at startup (`sentido = 1` CCW / `sentido = 2` CW) — runs the appropriate exit maneuver (`salida_counter()` or `salida_clock()`) then enters a loop of 11 navigation + corner cycles
+- Variable `daniel` accumulates ±90° per completed corner as an absolute heading offset, preventing IMU drift across multiple laps
+- Variable `probot` tracks post-evasion state (0 = normal, 1/2 = last block color, 3 = fallback search)
+
+**Clockwise evasion:**
+- 🔴 **Red block** → `rojo()`: +55° turn right → front wall follow → return to heading
+- 🟢 **Green block** → `verde()`: −40° turn left → left wall follow → return to heading
+
+**Counter-clockwise evasion (mirrored):**
+- 🔴 **Red block** → `rojo_ccw()`: +40° turn → left wall follow → return
+- 🟢 **Green block** → `verde_ccw()`: −55° turn → front wall follow → return
+
+**Utility functions:**
+- `look_for_block()`: creeps forward at low speed until the camera detects a block or the front LiDAR reads below the threshold — prevents acting on stale camera data
+- `move_for_distance()`: converts target distance in cm to a timed drive call using wheel circumference (17.5 cm)
 
 ### Shared PID Controllers
 
@@ -209,6 +227,7 @@ Runs on the **LEGO Inventor Hub** via PyBricks. Extends the Open Challenge with 
 | Kd | 0.8 | Dampens oscillation near target |
 | Tolerance | ±2° | Stop condition |
 | Deadband | ±1° | Prevents micro-oscillation |
+| Min speed | 200 (Obs_Chall) / 100 (Ope_Chall) | Higher floor reduces slow final approach time |
 
 **`drive_with_heading_lock(heading, speed, sensor, value)`** — Forward driving with IMU heading correction.
 
@@ -253,7 +272,7 @@ Runs on the **LEGO Inventor Hub** via PyBricks. Extends the Open Challenge with 
 1. CarloBot starts and reads both lateral LiDAR sensors simultaneously
 2. If the **right** sensor exceeds 1,000 mm first → **clockwise** lap (`sigue_pared1`)
 3. If the **left** sensor exceeds 1,000 mm first → **counter-clockwise** lap (`sigue_pared2`)
-4. At each corner: detect open space (> 1,000 mm) → 500ms confirmation → 90° IMU-guided turn → wall reacquisition (5 consecutive readings < 1,000 mm) → resume
+4. At each corner: detect open space (> 1,000 mm) → 500ms confirmation → 90° IMU-guided turn → wall reacquisition (3 consecutive readings < 1,000 mm) → resume
 5. After **12 corners** (3 full laps), robot drives to finish line and stops
 
 **Competition speed:** `drive_speed = 700` — balanced between speed and reliability.
@@ -266,7 +285,7 @@ Same as Open Challenge, plus:
 - 🟢 **Green** → pass left — `verde()`: −40° turn → wall follow → return
 - Camera re-read after each evasion confirms clearance before resuming
 
-**Competition speed:** `drive_speed = 500` — reduced to give camera pipeline sufficient processing time.
+**Competition speed:** `drive_speed = 500` (CW) / `drive_speed = 400` (CCW) — reduced to give camera pipeline sufficient processing time.
 
 ### Risk Management
 
@@ -290,7 +309,7 @@ Same as Open Challenge, plus:
 | 1 | Reduce robot height | High-speed corner instability | Motor redistribution → 16.5 cm | ✅ Fixed |
 | 2 | LiDAR corner threshold | False corners at 800 mm | Raised threshold to 1,000 mm | ✅ Fixed |
 | 3 | Non-blocking ESP32 | PUPRemote lost connection due to `sleep_ms()` | State machine FREE/WAITING per sensor | ✅ Fixed |
-| 4 | Red LAB threshold | False negatives under competition lighting | Broadened LAB range to `(30, 85, 15, 70, −10, 55)` | ✅ Fixed |
+| 4 | Red LAB threshold | False negatives under competition lighting | Broadened LAB range to `(0, 58, 14, 127, -128, 127)` | ✅ Fixed |
 | 5 | Post-corner trajectory | Robot loses wall reference after evasion at corner | Under development | ⚠️ Pending |
 
 ### Key Engineering Lessons
@@ -318,7 +337,7 @@ Same as Open Challenge, plus:
 
 1. **Flash `Pro_CAM.py`** onto the OpenMV H7 Plus via OpenMV IDE. Starts automatically on power-up.
 2. **Flash `Con_ESP32.py`** onto the ESP32 via Thonny. Copy as `boot.py` for automatic startup.
-3. **Connect the ESP32** to LEGO Hub Port D via PUPRemote cable (modified PoweredUp cable with SDA, SCL, 5V, GND exposed).
+3. **Connect the ESP32** to LEGO Hub Port F via PUPRemote cable (modified PoweredUp cable with SDA, SCL, 5V, GND exposed).
 4. **Upload** `Ope_Chall.py` or `Obs_Chall.py` to the LEGO Hub via Pybricks.
 5. Press the **center button** on the Hub to start the run.
 
@@ -331,3 +350,5 @@ Same as Open Challenge, plus:
 **MAD Engineering — WRO 2026 Future Engineers**
 *Game Changer Robotics Academy · El Salvador*
 *Built with 🧱 LEGO · 🐍 MicroPython · 📷 Computer Vision · 📡 LiDAR · ⚙️ PID Control*
+
+</div>
